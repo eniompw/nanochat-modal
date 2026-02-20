@@ -16,16 +16,18 @@ VOL_PATH = Path("/vol")
 RUNS_DIR = VOL_PATH / "runs"
 CACHE_DIR = VOL_PATH / "cache"
 LOCAL_DATA_DIR = "/tmp/nanochat_local"
+REPO_DIR = Path("/root/nanochat")
+VENV_PYTHON = "/root/nanochat/.venv/bin/python"
 
 _NV = "/usr/local/lib/python3.11/site-packages/nvidia"
-LD_LIBRARY_PATH = ":".join([
-    f"{_NV}/cuda_runtime/lib", f"{_NV}/cuda_cupti/lib",
-    f"{_NV}/cublas/lib",       f"{_NV}/cudnn/lib",
-    f"{_NV}/cufft/lib",        f"{_NV}/curand/lib",  f"{_NV}/cusolver/lib",
-    f"{_NV}/cusparse/lib",     f"{_NV}/cusparselt/lib",
-    f"{_NV}/nccl/lib",         f"{_NV}/nvtx/lib",    f"{_NV}/nvshmem/lib",
-    f"{_NV}/nvjitlink/lib",    "/usr/local/cuda/lib64", "/usr/lib/x86_64-linux-gnu",
-])
+_NV_LIBS = [
+    "cuda_runtime", "cuda_cupti", "cublas", "cudnn", "cufft", "curand",
+    "cusolver", "cusparse", "cusparselt", "nccl", "nvtx", "nvshmem", "nvjitlink",
+]
+LD_LIBRARY_PATH = ":".join(
+    [f"{_NV}/{lib}/lib" for lib in _NV_LIBS]
+    + ["/usr/local/cuda/lib64", "/usr/lib/x86_64-linux-gnu"]
+)
 
 NVIDIA_PACKAGES = [
     "nvidia-cuda-runtime-cu12", "nvidia-cuda-cupti-cu12", "nvidia-cuda-nvrtc-cu12",
@@ -38,6 +40,13 @@ NVIDIA_PACKAGES = [
 TOKENIZER_PKL_URL = "https://huggingface.co/karpathy/nanochat-d32/resolve/main/tokenizer.pkl"
 TOKEN_BYTES_URL   = "https://huggingface.co/karpathy/nanochat-d32/resolve/main/token_bytes.pt"
 EVAL_BUNDLE_URL   = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
+
+_THREAD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "ARROW_USER_THREADS_DEFAULT": "1",
+    "PYARROW_NUM_THREADS": "1",
+}
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04", add_python="3.11")
@@ -52,29 +61,18 @@ image = (
         "mkdir -p /root/.cache/nanochat/tokenizer",
     )
     .env({
-        "WANDB_MODE":                  "disabled",
-        "LD_LIBRARY_PATH":             LD_LIBRARY_PATH,
-        "PYTHONPATH":                  "/root/nanochat",
-        "TOKENIZERS_PARALLELISM":      "false",
-        "UV_PYTHON":                   "/usr/local/bin/python3.11",
-        "NANOCHAT_BASE_DIR":           str(VOL_PATH),
-        "TORCHINDUCTOR_CACHE_DIR":     "/tmp/torch_cache",
-        "TRITON_CACHE_DIR":            "/tmp/triton_cache",
+        "WANDB_MODE":                    "disabled",
+        "LD_LIBRARY_PATH":               LD_LIBRARY_PATH,
+        "PYTHONPATH":                    "/root/nanochat",
+        "TOKENIZERS_PARALLELISM":        "false",
+        "UV_PYTHON":                     "/usr/local/bin/python3.11",
+        "NANOCHAT_BASE_DIR":             str(VOL_PATH),
+        "TORCHINDUCTOR_CACHE_DIR":       "/tmp/torch_cache",
+        "TRITON_CACHE_DIR":              "/tmp/triton_cache",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
-        "PYTHONFAULTHANDLER":          "1",
+        "PYTHONFAULTHANDLER":            "1",
     })
 )
-
-REPO_DIR    = Path("/root/nanochat")
-VENV_PYTHON = "/root/nanochat/.venv/bin/python"
-
-# Shared: keep CPU thread pools tame on every training invocation
-_THREAD_ENV = {
-    "OMP_NUM_THREADS":           "1",
-    "MKL_NUM_THREADS":           "1",
-    "ARROW_USER_THREADS_DEFAULT": "1",
-    "PYARROW_NUM_THREADS":       "1",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +88,7 @@ def _run(cmd: str, cwd: Path | None = None, env: dict | None = None) -> None:
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     last_out = [time.time()]
-    start    = time.time()
+    start = time.time()
 
     def _heartbeat():
         while proc.poll() is None:
@@ -109,7 +107,6 @@ def _run(cmd: str, cwd: Path | None = None, env: dict | None = None) -> None:
 
 
 def _sync_caches_in() -> None:
-    # Create dirs for both sides in one shot, then copy vol→tmp
     _run(f"mkdir -p /tmp/torch_cache /tmp/triton_cache {CACHE_DIR}/torch_cache {CACHE_DIR}/triton_cache")
     _run(f"cp -a {CACHE_DIR}/torch_cache/.  /tmp/torch_cache/  2>/dev/null || true")
     _run(f"cp -a {CACHE_DIR}/triton_cache/. /tmp/triton_cache/ 2>/dev/null || true")
@@ -122,48 +119,17 @@ def _sync_caches_out(vol_ref: modal.Volume) -> None:
 
 
 def _sync_data_in() -> None:
-    print("Copying dataset + tokenizer /vol → /tmp...", flush=True)
-    # Brace expansion creates all four subdirs in a single shell call
     _run(f"mkdir -p {LOCAL_DATA_DIR}/{{base_data,tokenizer,runs,eval_bundle}}")
     _run(f"cp -a {VOL_PATH}/base_data/. {LOCAL_DATA_DIR}/base_data/")
     _run(f"cp -a {VOL_PATH}/tokenizer/. {LOCAL_DATA_DIR}/tokenizer/")
     _run(f"cp -a {VOL_PATH}/eval_bundle/. {LOCAL_DATA_DIR}/eval_bundle/ 2>/dev/null || true")
-    _run(f"cp -a {RUNS_DIR}/.            {LOCAL_DATA_DIR}/runs/         2>/dev/null || true")
+    _run(f"cp -a {RUNS_DIR}/.             {LOCAL_DATA_DIR}/runs/         2>/dev/null || true")
 
 
 def _sync_runs_out(vol_ref: modal.Volume) -> None:
     _run(f"mkdir -p {RUNS_DIR}")
     _run(f"cp -a {LOCAL_DATA_DIR}/runs/. {RUNS_DIR}/")
     vol_ref.commit()
-
-
-def _patch_train_script() -> None:
-    """
-    Patch base_train.py and dataloader.py directly in Python.
-    No bash heredoc needed — this function runs inside the Modal container.
-    """
-    train = REPO_DIR / "scripts/base_train.py"
-    lines = train.read_text().splitlines(True)
-
-    if "faulthandler.dump_traceback_later" not in "".join(lines):
-        lines.insert(0, "import faulthandler; faulthandler.dump_traceback_later(60, repeat=True)\n")
-
-    injections = [
-        ("compile", "torch.compile",  "[DEBUG] Reached torch.compile block..."),
-        ("loader",  "train_loader =", "[DEBUG] Reached DataLoader initialization..."),
-        ("loop",    "while step <",   "[DEBUG] Entering main training loop!"),
-    ]
-    seen, out = set(), []
-    for line in lines:
-        indent = line[: len(line) - len(line.lstrip())]
-        for key, trigger, msg in injections:
-            if key not in seen and trigger in line:
-                out.append(f'{indent}print("{msg}", flush=True)\n')
-                seen.add(key)
-        out.append(line)
-    train.write_text("".join(out))
-
-    print("Patched base_train.py", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +140,7 @@ def _patch_train_script() -> None:
 def ensure_tokenizer_on_volume():
     tok_dir = VOL_PATH / "tokenizer"
     tok_dir.mkdir(parents=True, exist_ok=True)
-    pkl_path   = tok_dir / "tokenizer.pkl"
+    pkl_path = tok_dir / "tokenizer.pkl"
     bytes_path = tok_dir / "token_bytes.pt"
     if not (pkl_path.exists() and bytes_path.exists()):
         _run(f"curl -L -o '{pkl_path}'   {TOKENIZER_PKL_URL}")
@@ -184,23 +150,20 @@ def ensure_tokenizer_on_volume():
         _run(f"unzip -q /tmp/eval_bundle.zip -d {VOL_PATH}")
         _run("rm /tmp/eval_bundle.zip")
     vol.commit()
-    return f"Tokenizer and eval_bundle saved to {VOL_PATH}"
 
 
 @app.function(image=image, volumes={str(VOL_PATH): vol}, timeout=2 * 60 * 60)
 def download_dataset(num_shards: int):
     target_dir = VOL_PATH / "base_data"
     target_dir.mkdir(parents=True, exist_ok=True)
-    existing = list(target_dir.glob("shard_*.parquet"))
-    if len(existing) >= num_shards:
-        return f"Dataset already has {len(existing)} shards, skipping."
+    if len(list(target_dir.glob("shard_*.parquet"))) >= num_shards:
+        return
     _run(
         f"uv run --no-sync python -m nanochat.dataset -n {num_shards} -w 32",
         cwd=REPO_DIR,
         env={"NANOCHAT_BASE_DIR": str(VOL_PATH)},
     )
     vol.commit()
-    return f"Downloaded {num_shards} shards into {target_dir}"
 
 
 @app.function(image=image, gpu="H100:8", timeout=24 * 60 * 60, volumes={str(VOL_PATH): vol})
@@ -217,15 +180,12 @@ def run_speedrun(model: str = "d12", force_restart: bool = False):
     )
     _sync_caches_out(vol)
     _sync_runs_out(vol)
-    return f"Done. Outputs in {RUNS_DIR}"
 
 
 @app.function(image=image, gpu="H100:1", timeout=30 * 60, volumes={str(VOL_PATH): vol})
 def smoke_test_10_steps(model: str = "d12"):
-    print("Starting smoke test...", flush=True)
     _sync_caches_in()
     _sync_data_in()
-    _patch_train_script()  # pure Python — no bash heredoc needed
     _run(
         f"{VENV_PYTHON} -u scripts/base_train.py --run=d12_test "
         "--num-iterations=10 --device-batch-size=4 "
@@ -233,23 +193,21 @@ def smoke_test_10_steps(model: str = "d12"):
         "--eval-every=-1 --core-metric-every=-1 --sample-every=-1",
         cwd=REPO_DIR,
         env={
-            "PYTHONUNBUFFERED":          "1",
-            "NANOCHAT_BASE_DIR":         LOCAL_DATA_DIR,
-            "TORCHDYNAMO_DISABLE":       "1",
+            "PYTHONUNBUFFERED":    "1",
+            "NANOCHAT_BASE_DIR":   LOCAL_DATA_DIR,
+            "TORCHDYNAMO_DISABLE": "1",
             **_THREAD_ENV,
         },
     )
     _sync_caches_out(vol)
-    return "Smoke test complete."
 
 
 @app.local_entrypoint()
-def main(task: str = "run", model: str = "d12"):
+def main(task: str = "run", model: str = "d12", force_restart: bool = False):
+    ensure_tokenizer_on_volume.remote()
+    num_shards = 2 if task == "test" else 240
+    download_dataset.remote(num_shards=num_shards)
     if task == "test":
-        ensure_tokenizer_on_volume.remote()
-        download_dataset.remote(num_shards=2)
-        print(smoke_test_10_steps.remote(model=model))
+        smoke_test_10_steps.remote(model=model)
     else:
-        ensure_tokenizer_on_volume.remote()
-        download_dataset.remote(num_shards=240)
-        print(run_speedrun.remote(model=model))
+        run_speedrun.remote(model=model, force_restart=force_restart)
