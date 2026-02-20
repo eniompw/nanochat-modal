@@ -31,7 +31,7 @@ modal setup
 
 ### 1) Smoke test (recommended)
 
-Runs a 10-step training loop on 1×H100.
+Runs a 10-step training loop on 1×H100 with evaluation disabled (no tokenizer overhead).
 
 ```bash
 modal run speedrun-d12.py --task test
@@ -49,9 +49,9 @@ modal run speedrun-d12.py --task test --model d26
 
 Notes:
 
-- On the very first run, the first forward pass may be quiet for **10+ minutes** while `torch.compile` / Inductor warms up and generates Triton kernels. The script prints a `[HEARTBEAT]` line every ~30s to confirm the process is alive.
+- The smoke test uses a small batch size (`--device-batch-size=4`, `--total-batch-size=8192`) to fit on a single H100, and skips all evaluation (`--eval-every=-1`) to avoid slow on-the-fly tokenization of eval data.
+- On the very first run, the first forward pass may be quiet for a few minutes while `torch.compile` / Inductor warms up. The script prints a `[HEARTBEAT]` line every ~60s to confirm the process is alive.
 - On subsequent runs, compiled kernels are loaded from the `/vol` cache and training begins immediately.
-- Memory snapshots are not required for fast cold-starts because the heavy Python environment is baked into the image and the compilation cache is persisted to the volume.
 
 ### 2) Full speedrun
 
@@ -118,7 +118,7 @@ Because all of this lives on the Volume, subsequent runs will not re-download da
 
 ### Logging + heartbeat
 
-The script runs commands via `subprocess.Popen` with stderr merged into stdout, so you see exceptions immediately. A background thread prints `[HEARTBEAT]` every ~30s if there is no output — useful during the initial compilation phase.
+The script runs commands via `subprocess.Popen` with stderr merged into stdout, so you see exceptions immediately. A background thread prints `[HEARTBEAT]` every ~60s if there is no output — useful during the initial compilation phase.
 
 ## Inspecting outputs
 
