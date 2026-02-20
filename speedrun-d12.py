@@ -1,5 +1,4 @@
 import os
-import re
 import subprocess
 import threading
 import time
@@ -86,7 +85,7 @@ def _run(cmd: str, cwd: Path | None = None, env: dict | None = None) -> None:
     base_env = {**os.environ, **(env or {})}
     print(f"\n[EXEC] {cmd}\n", flush=True)
     proc = subprocess.Popen(
-        ["stdbuf", "-oL", "bash", "-lc", cmd],
+        ["stdbuf", "-oL", "bash", "-c", cmd],
         cwd=cwd, env=base_env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
@@ -95,9 +94,9 @@ def _run(cmd: str, cwd: Path | None = None, env: dict | None = None) -> None:
 
     def _heartbeat():
         while proc.poll() is None:
-            time.sleep(30)
+            time.sleep(60)
             silence = int(time.time() - last_out[0])
-            if silence >= 30:
+            if silence >= 60:
                 print(f"[HEARTBEAT] silent {silence}s / total {int(time.time()-start)}s", flush=True)
 
     threading.Thread(target=_heartbeat, daemon=True).start()
@@ -164,15 +163,7 @@ def _patch_train_script() -> None:
         out.append(line)
     train.write_text("".join(out))
 
-    # Cap ProcessPool workers in the dataloader (smoke-test stability)
-    dlp = REPO_DIR / "nanochat/dataloader.py"
-    dl  = dlp.read_text()
-    dl2 = re.sub(r"max_workers\s*=\s*\d+",              "max_workers=1", dl)
-    dl2 = re.sub(r"max_workers\s*=\s*os\.cpu_count\(\)", "max_workers=1", dl2)
-    if dl2 != dl:
-        dlp.write_text(dl2)
-
-    print("Patched base_train.py and dataloader.py", flush=True)
+    print("Patched base_train.py", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -237,21 +228,14 @@ def smoke_test_10_steps(model: str = "d12"):
     _patch_train_script()  # pure Python — no bash heredoc needed
     _run(
         f"{VENV_PYTHON} -u scripts/base_train.py --run=d12_test "
-        "--num-iterations=10 --device-batch-size=16",
+        "--num-iterations=10 --device-batch-size=4 "
+        "--total-batch-size=8192 "
+        "--eval-every=-1 --core-metric-every=-1 --sample-every=-1",
         cwd=REPO_DIR,
         env={
             "PYTHONUNBUFFERED":          "1",
             "NANOCHAT_BASE_DIR":         LOCAL_DATA_DIR,
             "TORCHDYNAMO_DISABLE":       "1",
-            "TORCH_COMPILE_DISABLE":     "1",
-            "TRITON_PRINT_AUTOTUNING":   "1",
-            "FLASH_ATTENTION_FORCE_DISABLE": "1",
-            "TORCH_SDPA_FORCE_ENABLED":  "1",
-            "MASTER_ADDR":               "127.0.0.1",
-            "MASTER_PORT":               "29500",
-            "RANK": "0", "WORLD_SIZE": "1",
-            "NCCL_SOCKET_IFNAME":        "lo",
-            "NCCL_DEBUG":                "INFO",
             **_THREAD_ENV,
         },
     )
@@ -263,7 +247,7 @@ def smoke_test_10_steps(model: str = "d12"):
 def main(task: str = "run", model: str = "d12"):
     if task == "test":
         ensure_tokenizer_on_volume.remote()
-        download_dataset.remote(num_shards=1)
+        download_dataset.remote(num_shards=2)
         print(smoke_test_10_steps.remote(model=model))
     else:
         ensure_tokenizer_on_volume.remote()
