@@ -50,7 +50,7 @@ _THREAD_ENV = {
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04", add_python="3.11")
-    .apt_install("git", "curl", "wget", "build-essential", "pkg-config", "findutils", "unzip")
+    .apt_install("git", "curl", "wget", "build-essential", "pkg-config", "findutils", "unzip", "rsync")
     .pip_install("uv", "transformers", "tiktoken", *NVIDIA_PACKAGES)
     .run_commands(
         "git clone --depth 1 https://github.com/karpathy/nanochat.git /root/nanochat",
@@ -58,7 +58,7 @@ image = (
         "find /root/nanochat -name 'speedrun.sh' | head -1 | xargs -I{} cp {} /root/nanochat/speedrun.sh",
         "chmod +x /root/nanochat/speedrun.sh",
         "sed -i '1 a export WANDB_MODE=disabled' /root/nanochat/speedrun.sh",
-        "sed -i 's/base_train -- /base_train -- --save-every=500 /' /root/nanochat/speedrun.sh",
+        "sed -i 's/base_train -- /base_train -- --save-every=500 --eval-every=200 /' /root/nanochat/speedrun.sh",
         "mkdir -p /root/.cache/nanochat/tokenizer",
     )
     .env({
@@ -121,7 +121,7 @@ def _sync_caches_out(vol_ref: modal.Volume) -> None:
 
 def _sync_data_in() -> None:
     _run(f"mkdir -p {LOCAL_DATA_DIR}/{{base_data,tokenizer,runs,eval_bundle}}")
-    _run(f"cp -a {VOL_PATH}/base_data/. {LOCAL_DATA_DIR}/base_data/")
+    _run(f"rsync -a --info=progress2 {VOL_PATH}/base_data/ {LOCAL_DATA_DIR}/base_data/")
     _run(f"cp -a {VOL_PATH}/tokenizer/. {LOCAL_DATA_DIR}/tokenizer/")
     _run(f"cp -a {VOL_PATH}/eval_bundle/. {LOCAL_DATA_DIR}/eval_bundle/ 2>/dev/null || true")
     _run(f"cp -a {RUNS_DIR}/.             {LOCAL_DATA_DIR}/runs/         2>/dev/null || true")
