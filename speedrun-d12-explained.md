@@ -2,6 +2,12 @@
 
 This script uses [Modal](https://modal.com/) to run [Karpathy's nanochat](https://github.com/karpathy/nanochat) training speedrun on cloud GPUs (8× H100s).
 
+## What is the Speedrun?
+
+The goal is to train a GPT-2 class language model (a text-generating transformer) as fast and cheaply as possible. [Karpathy's nanochat](https://github.com/karpathy/nanochat) provides optimised training code and a leaderboard — the "speedrun" is about reaching a target eval score in the fewest GPU-hours. The `d12` model is ~100M parameters and trains in roughly 10 minutes on 8× H100 GPUs.
+
+The training data is [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu), a large filtered web text dataset. The model learns to predict the next token (word piece) in a sequence — the same core technique behind GPT-2, GPT-3, and ChatGPT.
+
 ---
 
 ## Overview
@@ -39,6 +45,8 @@ The Modal image is built layer-by-layer:
 5. Locates and copies `speedrun.sh`, then patches it to disable Weights & Biases logging
 6. Sets environment variables (CUDA paths, cache dirs, thread limits)
 
+> **Caching:** Modal caches each image layer. The image is only rebuilt when the script definition changes — on subsequent runs it's reused instantly, so you don't pay for the build every time.
+
 ### Helper Functions
 
 #### `_run(cmd, cwd, env)`
@@ -47,9 +55,13 @@ Runs a shell command with **live stdout streaming** and a **heartbeat thread**. 
 #### `_sync_caches_in()` / `_sync_caches_out()`
 Copies Torch Inductor and Triton compilation caches between the persistent volume and local `/tmp`. This avoids re-compiling GPU kernels on every run.
 
+> **What is torch.compile / Triton?** PyTorch's `torch.compile` analyses your model and generates optimised GPU kernels (via [Triton](https://github.com/triton-lang/triton), a compiler for writing GPU code). On the **first run**, this compilation step can take several minutes with no visible output — this is normal. The compiled kernels are cached to the volume (`/vol/cache/`) so subsequent runs skip compilation and start training immediately.
+
 #### `_sync_data_in()` / `_sync_runs_out()`
 - **In:** Copies dataset shards, tokenizer, and eval bundle from the volume to fast local disk before training.
 - **Out:** Copies training run outputs (checkpoints, logs) back to the volume after training.
+
+> **Why copy to local disk?** Modal volumes are network-attached storage — fine for large sequential reads but slow for the random I/O patterns of training. The local disk (`/tmp`) is backed by fast NVMe SSDs directly attached to the GPU machine, so copying data there before training avoids I/O bottlenecks. The trade-off is a ~1–2 minute copy step at the start and end of each run.
 
 ### Modal Functions (Remote)
 
@@ -64,11 +76,14 @@ Runs `nanochat.dataset` to download and prepare the training data. Uses 240 shar
 #### `run_speedrun(model, force_restart)`
 The main training function:
 - Runs on **8× H100 GPUs** with a 24-hour timeout
+- Uses **distributed data parallel (DDP)** training — `speedrun.sh` launches the training script via `torchrun`, which spawns one process per GPU. Each GPU trains on a different slice of each batch, and gradients are synchronised across all 8 GPUs automatically via NCCL.
 - Optionally clears previous run data (`force_restart`)
+- **Resume by default** — if a previous run exists on the volume (checkpoints in `/vol/runs/<model>/`), training picks up where it left off. This means if a run fails or times out, you can simply re-run and it will continue. Use `--force-restart` only if you want to wipe everything and start fresh.
 - Syncs caches and data to local disk, runs `speedrun.sh`, then syncs everything back
 
 #### `smoke_test_10_steps(model)`
 A quick sanity check on **1× H100**:
+- Only **2 dataset shards** are downloaded (vs. 240 for a full run), so data prep is fast and cheap
 - Runs only 10 training iterations with `torch.compile` disabled (`TORCHDYNAMO_DISABLE=1`)
 - Skips evaluation, metrics, and sampling
 - Useful for verifying the setup works before committing to a full run
@@ -82,6 +97,26 @@ modal run speedrun-d12.py --force-restart  # wipe previous run and restart
 ```
 
 The entrypoint always ensures the tokenizer and dataset are ready before launching training.
+
+---
+
+## Debugging & Observability
+
+The script is designed to make remote GPU debugging easier:
+
+- **`[EXEC]` prefixes** — Every shell command is printed before it runs (line 85), so you can see exactly what's executing in the Modal logs.
+- **Live stdout streaming** — Output from subprocesses is streamed line-by-line with `flush=True`, not buffered until completion. `PYTHONUNBUFFERED=1` is also set for training to ensure Python output isn't delayed.
+- **`[HEARTBEAT]` messages** — If a command produces no output for 60+ seconds, a heartbeat is printed (line 98–99). This both prevents Modal from killing the container for inactivity and tells you the process is still alive.
+- **`stdbuf -oL`** — Forces line-buffered output from subprocesses so you see progress in real time rather than in large chunks.
+- **Smoke test** (`--task test`) — Lets you verify the entire pipeline (image, data, GPU, training loop) with minimal cost (1× H100, 2 shards, 10 steps, no `torch.compile`) before committing to a full run.
+
+---
+
+## Cost Notes
+
+**Can you set up on 1× H100 then switch to 8× H100 for training?** You don't need to — the setup is already cheap. The `ensure_tokenizer_on_volume` and `download_dataset` functions run with **no GPU at all**, so image building, tokenizer downloads, and dataset preparation cost nothing in GPU time. The 8× H100 billing only starts when `run_speedrun` executes.
+
+The ~1–2 minutes of data sync (`_sync_data_in`) at the start of `run_speedrun` does happen on 8× H100, but this can't be avoided — Modal containers are ephemeral, so data prepared in a separate (cheaper) container wouldn't be available in the training container. The volume is the shared layer, and the sync copies from it to local `/tmp` for faster I/O during training.
 
 ---
 
