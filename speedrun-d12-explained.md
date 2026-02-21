@@ -59,6 +59,8 @@ Downloads the tokenizer (`tokenizer.pkl`, `token_bytes.pt`) and evaluation bundl
 #### `download_dataset(num_shards)`
 Runs `nanochat.dataset` to download and prepare the training data. Uses 240 shards for a full run, 2 for a smoke test.
 
+> **What are shards / parquet files?** The training dataset ([FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)) is too large to handle as a single file, so it's split into **shards** — smaller, independently-loadable chunks. Each shard is stored as a [Parquet](https://parquet.apache.org/) file (`.parquet`), a columnar format that's compact and fast to read. During training, shards are loaded one at a time so the full dataset never needs to fit in memory at once.
+
 #### `run_speedrun(model, force_restart)`
 The main training function:
 - Runs on **8× H100 GPUs** with a 24-hour timeout

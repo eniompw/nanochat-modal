@@ -27,7 +27,7 @@ Runs 10 training steps on 1×H100 with evaluation disabled:
 modal run speedrun-d12.py --task test
 ```
 
-This seeds the volume with the tokenizer and a dataset shard, and validates the stack end-to-end. The full run skips re-downloading anything already on the volume.
+This seeds the volume with the tokenizer and a small dataset shard, and validates the stack end-to-end. The full run downloads 240 shards (the training data is [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) split into parquet files) but skips re-downloading anything already on the volume.
 
 ### Full speedrun
 
@@ -59,7 +59,7 @@ modal run speedrun-d12.py --force-restart
 
 ## How it works
 
-CPU-only setup functions download the tokenizer, eval bundle, and dataset before any GPU job starts — so you don't pay for GPU time during data download. On the first full run, `torch.compile` / Inductor may be quiet for several minutes while generating Triton kernels. A `[HEARTBEAT]` line prints every ~60s to confirm the process is alive. Subsequent runs load compiled kernels from the volume cache and start training immediately. Checkpoints save periodically so a preempted run can resume without losing significant progress.
+CPU-only setup functions download the tokenizer, eval bundle, and dataset before any GPU job starts — so you don't pay for GPU time during data download. On the first full run, `torch.compile` / Inductor may be quiet for several minutes while generating Triton kernels. A `[HEARTBEAT]` line prints every ~60s to confirm the process is alive. Subsequent runs load compiled kernels from the volume cache and start training immediately. By default, a checkpoint is saved only at the end of training. To enable periodic saves (e.g. every 1000 steps), pass `--save-every=1000` to `base_train.py`.
 
 > **Why Python 3.11?** nanochat requires `>=3.10` and Modal supports up to 3.14, but 3.11 is currently the most battle-tested version with PyTorch and CUDA tooling. If you want to bump to 3.12+, update `add_python`, the `_NV` site-packages path, and the `UV_PYTHON` / `uv sync --python` references in `speedrun-d12.py`.
 
