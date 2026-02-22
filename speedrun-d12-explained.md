@@ -124,6 +124,29 @@ The ~1–2 minutes of data sync (`_sync_data_in`) at the start of `run_speedrun`
 
 ---
 
+## Checkpoints
+
+Training checkpoints are saved every 500 steps (configured via `--save-every=500` in the image build) and at the end of training. Each checkpoint writes **10 files** (for an 8-GPU run):
+
+| File | Count | Written by | Description |
+|---|---|---|---|
+| `model_XXXXXX.pt` | 1 | Rank 0 only | Full model weights (BF16) |
+| `meta_XXXXXX.json` | 1 | Rank 0 only | Training metadata (step, config, val bpb, dataloader/loop state) |
+| `optim_XXXXXX_rankN.pt` | 8 | Every GPU rank | Per-rank optimizer state shard |
+
+### Size Estimates (d12 model, ~286M parameters)
+
+| Component | Estimate |
+|---|---|
+| `model_XXXXXX.pt` | ~572 MB (286M params × 2 bytes BF16) |
+| `meta_XXXXXX.json` | ~few KB |
+| 8× `optim_*_rankN.pt` | ~100–200 MB each (Adam moments for embeddings + Muon momentum for transformer matrices) |
+| **Total per checkpoint** | **~1.4–2.2 GB** |
+
+The checkpoint save/load logic lives in [`nanochat/checkpoint_manager.py`](https://github.com/karpathy/nanochat/blob/main/nanochat/checkpoint_manager.py), called from [`scripts/base_train.py`](https://github.com/karpathy/nanochat/blob/main/scripts/base_train.py). Checkpoints are saved to `LOCAL_DATA_DIR/runs/` during training and synced back to the persistent volume (`/vol/runs/`) at the end via `_sync_runs_out`. Resume works by loading the latest checkpoint from this directory.
+
+---
+
 ## Data Flow
 
 ```
